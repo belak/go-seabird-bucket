@@ -69,7 +69,16 @@ type bucketFact struct {
 
 type bucketFactResponse struct {
 	Text    string
+	Creator string
 	Verb    string
+}
+
+type bucketVariable struct {
+	Values []bucketValue
+}
+
+type bucketValue struct {
+	Text    string
 	Creator string
 }
 
@@ -80,7 +89,17 @@ func newBucketPlugin(b *seabird.Bot, bm *seabird.BasicMux, mm *seabird.MentionMu
 	}
 
 	err := db.Update(func(tx *nut.Tx) error {
-		_, err := tx.CreateBucketIfNotExists("bucket")
+		b, err := tx.CreateBucketIfNotExists("bucket")
+		if err != nil {
+			return err
+		}
+
+		_, err = b.CreateBucketIfNotExists("facts")
+		if err != nil {
+			return err
+		}
+
+		_, err = b.CreateBucketIfNotExists("vars")
 		return err
 	})
 	if err != nil {
@@ -130,11 +149,11 @@ func (p *bucketPlugin) mentionCallback(b *seabird.Bot, m *irc.Message) {
 		//
 		// TODO: Handle match[1]
 
-		key := "fact:" + strings.ToLower(match[2])
+		key := strings.ToLower(match[2])
 
 		out := &bucketFact{}
 		_ = p.db.View(func(tx *nut.Tx) error {
-			bucket := tx.Bucket("bucket")
+			bucket := tx.Bucket("bucket").Bucket("facts")
 			return bucket.Get(key, out)
 		})
 
@@ -171,8 +190,7 @@ func (p *bucketPlugin) mentionCallback(b *seabird.Bot, m *irc.Message) {
 		// match[2] - is|is also|are|<\w+>
 		// match[3] - description
 
-		key := "fact:" + strings.ToLower(match[1])
-		fmt.Println(key)
+		key := strings.ToLower(match[1])
 
 		verb := match[2]
 		if verb == "is also" {
@@ -184,11 +202,11 @@ func (p *bucketPlugin) mentionCallback(b *seabird.Bot, m *irc.Message) {
 		out := &bucketFact{}
 		resp := bucketFactResponse{
 			Text:    match[3],
-			Verb:    verb,
 			Creator: bm.Who,
+			Verb:    verb,
 		}
 		_ = p.db.Update(func(tx *nut.Tx) error {
-			bucket := tx.Bucket("bucket")
+			bucket := tx.Bucket("bucket").Bucket("facts")
 			bucket.Get(key, out)
 			out.Responses = append(out.Responses, resp)
 			return bucket.Put(key, out)

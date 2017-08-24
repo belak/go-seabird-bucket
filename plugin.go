@@ -1,7 +1,10 @@
 package bucket
 
 import (
+	"bytes"
 	"fmt"
+	"math/rand"
+	"os"
 	"regexp"
 	"strings"
 
@@ -72,7 +75,8 @@ type bucketFactResponse struct {
 }
 
 type bucketVariable struct {
-	Values []bucketValue
+	Values  []bucketValue
+	Creator string
 }
 
 type bucketValue struct {
@@ -214,16 +218,106 @@ func (p *bucketPlugin) mentionCallback(b *seabird.Bot, m *irc.Message) {
 	} else if match := listVarsRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
 	} else if match := listVarRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
 		// match[1] - variable
+
+		key := strings.ToLower(match[1])
+		out := &bucketVariable{}
+		_ = p.db.View(func(tx *nut.Tx) error {
+			bucket := tx.Bucket("bucket").Bucket("vars")
+			return bucket.Get(key, out)
+		})
+
+		data := &bytes.Buffer{}
+		var first bool
+		for _, v := range out.Values {
+			if !first {
+				data.WriteString(", ")
+			}
+			data.WriteString(v.Text)
+		}
+
+		b.Reply(m, "Ok %s, %s is %s", bm.Who, key, data.String())
 	} else if match := removeValRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
 		// match[1] - variable
 		// match[2] - value
 	} else if match := addValRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
 		// match[1] - variable
 		// match[2] - value
-	} else if match := createVarRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
+
+		key := strings.ToLower(match[1])
+		out := &bucketVariable{}
+		val := bucketValue{
+			Text:    match[2],
+			Creator: bm.Who,
+		}
+		err := p.db.Update(func(tx *nut.Tx) error {
+			bucket := tx.Bucket("bucket").Bucket("vars")
+			err := bucket.Get(key, out)
+			if err != nil {
+				return err
+			}
+
+			out.Values = append(out.Values, val)
+			return bucket.Put(key, out)
+		})
+		if err != nil {
+			b.Reply(m, "Ok %s, %s", err.Error())
+			return
+		}
+
+		logger.WithFields(logrus.Fields{
+			"name": key,
+			"text": val.Text,
+		}).Info("Added value to variable")
+
+		// TODO: Look this up from a fact, falling back to this response if need be.
+		b.Reply(m, "Ok %s, added %s to variable %s", bm.Who, val.Text, key)
+	} else if match := createVarRegexp.FindStringSubmatch(bm.Data); bm.OP && len(match) > 0 {
 		// match[1] - variable
-	} else if match := removeVarRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
+		key := strings.ToLower(match[1])
+		out := &bucketVariable{}
+		var created bool
+		_ = p.db.Update(func(tx *nut.Tx) error {
+			bucket := tx.Bucket("bucket").Bucket("vars")
+			bucket.Get(key, out)
+			if out.Creator == "" {
+				created = true
+				out.Creator = bm.Who
+			}
+			return bucket.Put(key, out)
+		})
+
+		if created {
+			logger.WithFields(logrus.Fields{
+				"name": key,
+			}).Info("Created variable")
+
+			// TODO: Look this up from a fact, falling back to this response if need be.
+			b.Reply(m, "Ok %s, created variable %s", bm.Who, key)
+		} else {
+			// TODO: Look this up from a fact, falling back to this response if need be.
+			b.Reply(m, "Ok %s, variable %s already created", bm.Who, key)
+		}
+	} else if match := removeVarRegexp.FindStringSubmatch(bm.Data); bm.OP && len(match) > 0 {
 		// match[1] - variable
+		key := strings.ToLower(match[1])
+		out := &bucketVariable{}
+		_ = p.db.Update(func(tx *nut.Tx) error {
+			bucket := tx.Bucket("bucket").Bucket("vars")
+			bucket.Get(key, out)
+			return bucket.Delete(key)
+		})
+
+		if out.Creator != "" {
+			logger.WithFields(logrus.Fields{
+				"name": key,
+			}).Info("Removed variable")
+
+			// TODO: Look this up from a fact, falling back to this response if need be.
+			b.Reply(m, "Ok %s, removed variable %s", bm.Who, key)
+		} else {
+			// TODO: Look this up from a fact, falling back to this response if need be.
+			b.Reply(m, "Ok %s, variable %s doesn't exist", bm.Who, key)
+		}
 	} else if match := fullInventoryRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
 	} else if match := inventoryRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
 	} else if match := isRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
@@ -262,7 +356,18 @@ func (p *bucketPlugin) mentionCallback(b *seabird.Bot, m *irc.Message) {
 		// TODO: Look this up from a fact, falling back to this response if need be.
 		b.Reply(m, "Ok %s, %s %s %s", bm.Who, match[1], resp.Verb, resp.Text)
 	} else if match := renderRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
-		// match[1] - text to render
+		text := os.Expand(match[1], func(key string) string {
+			outVar := &bucketVariable{}
+			_ = p.db.View(func(tx *nut.Tx) error {
+				bucket := tx.Bucket("bucket").Bucket("vars")
+				return bucket.Get(key, outVar)
+			})
+			if len(outVar.Values) == 0 {
+				return ""
+			}
+			return outVar.Values[rand.Intn(len(outVar.Values))].Text
+		})
+		b.MentionReply(m, "%s", text)
 	} else {
 		// Attempt lookup
 	}

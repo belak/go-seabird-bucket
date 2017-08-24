@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/belak/go-seabird"
 	"github.com/belak/go-seabird/plugins"
 	"github.com/belak/nut"
@@ -17,13 +18,14 @@ func init() {
 
 var (
 	// These are roughly in the order that they appear in xkcd-Bucket
-	literalRegexp = regexp.MustCompile(`(?i)^literal(?:\[(\d+)\])? (.*)$`)
-	undoRegexp    = regexp.MustCompile(`(?i)^undo(?: last)?$`)
-	mergeRegexp   = regexp.MustCompile(`(?i)^merge (.*) [-=]> (.*)$`)
-	aliasRegexp   = regexp.MustCompile(`(?i)^alias (.*) [-=]> (.*)$`)
-	lookupRegexp  = regexp.MustCompile(`(?i)^lookup (.*)$`)
-	forgetRegexp  = regexp.MustCompile(`(?i)^forget (.*)$`)
-	whatRegexp    = regexp.MustCompile(`(?i)^what was that\??$`)
+	literalRegexp  = regexp.MustCompile(`(?i)^literal(?:\[(\d+)\])? (.*)$`)
+	undoRegexp     = regexp.MustCompile(`(?i)^undo(?: last)?$`)
+	mergeRegexp    = regexp.MustCompile(`(?i)^merge (.*) [-=]> (.*)$`)
+	aliasRegexp    = regexp.MustCompile(`(?i)^alias (.*) [-=]> (.*)$`)
+	lookupRegexp   = regexp.MustCompile(`(?i)^lookup (.*)$`)
+	forgetIsRegexp = regexp.MustCompile(`(?i)^forget (.+?) (is|is also|are|<\w+>) (.+)$`) // Custom feature
+	forgetRegexp   = regexp.MustCompile(`(?i)^forget (.*)$`)
+	whatRegexp     = regexp.MustCompile(`(?i)^what was that\??$`)
 
 	// Variable commands
 	//
@@ -39,7 +41,8 @@ var (
 	fullInventoryRegexp = regexp.MustCompile(`(?i)^(?:detailed inventory|list item details)$`)
 	inventoryRegexp     = regexp.MustCompile(`(?i)^(?:inventory|list items)$`)
 
-	isRegexp = regexp.MustCompile(`(?i)^(.+?) (is|is also|are|<\w+>) (.+)$`)
+	renderRegexp = regexp.MustCompile(`(?i)^render (.*)$`) // Custom feature
+	isRegexp     = regexp.MustCompile(`(?i)^(.+?) (is|is also|are|<\w+>) (.+)$`)
 )
 
 type bucketPlugin struct {
@@ -47,11 +50,6 @@ type bucketPlugin struct {
 	tracker *plugins.ChannelTracker
 
 	AdminModes string
-
-	// The last action which modified the database and the last phrase which
-	// we mentioned.
-	lastActionID string
-	lastFoundID  string
 }
 
 type bucketMessage struct {
@@ -142,6 +140,7 @@ func (p *bucketPlugin) mentionCallback(b *seabird.Bot, m *irc.Message) {
 	}
 
 	fmt.Printf("%+v\n", bm)
+	logger := b.GetLogger()
 
 	if match := literalRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
 		// match[1] - number or *
@@ -167,6 +166,48 @@ func (p *bucketPlugin) mentionCallback(b *seabird.Bot, m *irc.Message) {
 		// match[2] - target
 	} else if match := lookupRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
 		// match[1] - lookup string
+	} else if match := forgetIsRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
+		// match[1] - word
+		// match[2] - is|is also|are|<\w+>
+		// match[3] - description
+
+		key := strings.ToLower(match[1])
+
+		verb := match[2]
+		if verb == "is also" {
+			verb = "is"
+		} else if verb[0] == '<' {
+			verb = verb[1 : len(verb)-1]
+		}
+
+		var found bool
+		out := &bucketFact{}
+		_ = p.db.Update(func(tx *nut.Tx) error {
+			bucket := tx.Bucket("bucket").Bucket("facts")
+			bucket.Get(key, out)
+			for k, v := range out.Responses {
+				if v.Text == match[3] && v.Verb == verb {
+					found = true
+					out.Responses = append(out.Responses[:k], out.Responses[k+1:]...)
+					break
+				}
+			}
+			return bucket.Put(key, out)
+		})
+
+		if found {
+			logger.WithFields(logrus.Fields{
+				"key":  match[1],
+				"verb": verb,
+				"text": match[3],
+			}).Info("Removed fact")
+
+			// TODO: Look this up from a fact, falling back to this response if need be.
+			b.Reply(m, "Ok %s, forgot %s %s %s", bm.Who, match[1], verb, match[3])
+		} else {
+			// TODO: Look this up from a fact, falling back to this response if need be.
+			b.Reply(m, "Ok %s, couldn't find %s %s %s", bm.Who, match[1], verb, match[3])
+		}
 	} else if match := forgetRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
 		// match[1] - lookup string
 	} else if match := whatRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
@@ -212,8 +253,16 @@ func (p *bucketPlugin) mentionCallback(b *seabird.Bot, m *irc.Message) {
 			return bucket.Put(key, out)
 		})
 
-		// TODO: Look this up from a fact, falling back to this if need be.
+		logger.WithFields(logrus.Fields{
+			"key":  match[1],
+			"verb": resp.Verb,
+			"text": resp.Text,
+		}).Info("Stored fact")
+
+		// TODO: Look this up from a fact, falling back to this response if need be.
 		b.Reply(m, "Ok %s, %s %s %s", bm.Who, match[1], resp.Verb, resp.Text)
+	} else if match := renderRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
+		// match[1] - text to render
 	} else {
 		// Attempt lookup
 	}

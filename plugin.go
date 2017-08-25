@@ -165,6 +165,40 @@ func (p *bucketPlugin) mentionCallback(b *seabird.Bot, m *irc.Message) {
 	} else if match := mergeRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
 		// match[1] - merge
 		// match[2] - target
+
+		old_key := strings.ToLower(match[1])
+		new_key := strings.ToLower(match[2])
+
+		old := &bucketFact{}
+		new := &bucketFact{}
+		_ = p.db.Update(func(tx *nut.Tx) error {
+			bucket := tx.Bucket("bucket").Bucket("facts")
+			bucket.Get(old_key, old)
+			bucket.Get(new_key, new)
+
+			for _, v := range old.Responses {
+				new.Responses = append(new.Responses, v)
+			}
+
+			err := bucket.Put(new_key, new)
+			if err != nil {
+				return err
+			}
+
+			for _, v := range old.Responses {
+				logger.WithFields(logrus.Fields{
+					"original": match[1],
+					"new":      match[2],
+					"verb":     v.Verb,
+					"text":     v.Text,
+				}).Info("Moved fact")
+			}
+
+			return bucket.Delete(old_key)
+		})
+
+		// TODO: Look this up from a fact, falling back to this response if need be.
+		b.Reply(m, "Ok %s, moved responses from %s to %s", bm.Who, match[1], match[2])
 	} else if match := aliasRegexp.FindStringSubmatch(bm.Data); len(match) > 0 {
 		// match[1] - alias
 		// match[2] - target
